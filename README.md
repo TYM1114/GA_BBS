@@ -77,6 +77,11 @@ g++ main.cpp -o solver -O3
 
 ---
 
+### 可以直接使用 
+```bash
+python stress_test.py
+```
+跑測資
 ##  演算法邏輯細節
 
 ### 1. 基因演算法 (GA)
