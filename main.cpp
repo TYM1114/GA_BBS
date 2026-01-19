@@ -33,79 +33,125 @@ struct MissionLog {
 };
 
 // ==========================================
+// ACO Module: Pheromone Manager (4D Matrix)
+// ==========================================
+class PheromoneManager {
+private:
+    // Dimensions: [Row][Bay][Level][Step_Index]
+    std::vector<std::vector<std::vector<std::vector<double>>>> matrix;
+    int maxRows, maxBays, maxTiers, maxSteps;
+    double evaporationRate = 0.1;
+
+public:
+    PheromoneManager(int r, int b, int t, int s) 
+        : maxRows(r), maxBays(b), maxTiers(t), maxSteps(s) {
+        // Initialize all pheromone values to 1.0
+        matrix.assign(r, std::vector<std::vector<std::vector<double>>>(
+            b, std::vector<std::vector<double>>(
+                t, std::vector<double>(s, 1.0))));
+    }
+
+    double getPheromone(int r, int b, int t, int step) const {
+        if (r < 0 || r >= maxRows || b < 0 || b >= maxBays || t < 0 || t >= maxTiers) return 1.0;
+        int sIdx = step % maxSteps; // Use modulo to handle long sequences
+        return matrix[r][b][t][sIdx];
+    }
+
+    void update(const std::vector<MissionLog>& bestLogs, int totalCost) {
+        // 1. Evaporation: Decrease pheromone levels over time
+        for (auto& row : matrix)
+            for (auto& bay : row)
+                for (auto& tier : bay)
+                    for (double& val : tier) val *= (1.0 - evaporationRate);
+
+        // 2. Reinforcement: Increase pheromone for successful paths
+        if (totalCost <= 0) return;
+        double deposit = 100.0 / (totalCost + 1);
+        
+        for (const auto& log : bestLogs) {
+            if (log.dst.row != -1) { // Record successful destination coordinates
+                int sIdx = log.mission_no % maxSteps;
+                if (log.dst.row < maxRows && log.dst.bay < maxBays && log.dst.tier < maxTiers) {
+                    matrix[log.dst.row][log.dst.bay][log.dst.tier][sIdx] += deposit;
+                }
+            }
+        }
+    }
+};
+// ==========================================
 // Core Module 1: BBS Evaluator (Revised: With Lookahead Penalty)
 // ==========================================
 class BBS_Evaluator {
 public:
-    // Lightweight Node for GA
     struct SearchNode {
         YardSystem yard;
         int g; // Actual Cost
-        int f; // Sorting Score (g + penalty)
-        bool operator<(const SearchNode& other) const { return f < other.f; } // Sort by f
+        int f; // Total Score (g + penalty)
+        bool operator<(const SearchNode& other) const { return f < other.f; }
     };
 
-    // Node with History Logging for Output
     struct LogNode {
         YardSystem yard;
-        int g; // Actual Cost
-        int f; // Sorting Score (g + penalty)
+        int g;
+        int f;
         std::vector<MissionLog> history;
-        bool operator<(const LogNode& other) const { return f < other.f; } // Sort by f
+        bool operator<(const LogNode& other) const { return f < other.f; }
     };
 
     // -------------------------------------------------------------------------
-    // Helper: Calculate Move Penalty (Lookahead: Check if blocking future targets)
-    // Strategy: Scan the entire stack to find the "most urgent" (Minimum Priority) box.
+    // Helper: Calculate Move Penalty with ACO Guidance
     // -------------------------------------------------------------------------
     static int calculateMovePenalty(const YardSystem& yard, int r, int b, 
                                     const std::unordered_map<int, int>& priorityMap, 
-                                    int currentSeqIndex) {
+                                    int currentSeqIndex,
+                                    const PheromoneManager* pm = nullptr) {
         
-        int topTier = yard.tops[r][b] - 1;
-        if (topTier < 0) return 0; // Empty stack
+        int currentHeight = yard.tops[r][b];
+        int topTier = currentHeight - 1;
+        int penalty = 0;
 
-        // Initialize to maximum value
+        // 1. Lookahead Penalty: Protect future targets
         int minBelowPriority = std::numeric_limits<int>::max();
         bool foundFutureTarget = false;
-
-        // [CRITICAL] Scan the entire stack (from bottom tier 0 to topTier)
-        for (int t = 0; t <= topTier; ++t) {
-            int boxId = yard.grid[r][b][t];
-            
-            auto it = priorityMap.find(boxId);
-            if (it != priorityMap.end()) {
-                int p = it->second;
-                
-                // Only consider "future" boxes that haven't been retrieved yet (Priority >= current)
-                if (p >= currentSeqIndex) {
-                    if (p < minBelowPriority) {
-                        minBelowPriority = p;
-                        foundFutureTarget = true;
+        if (topTier >= 0) {
+            for (int t = 0; t <= topTier; ++t) {
+                int boxId = yard.grid[r][b][t];
+                auto it = priorityMap.find(boxId);
+                if (it != priorityMap.end()) {
+                    int p = it->second;
+                    if (p >= currentSeqIndex) {
+                        if (p < minBelowPriority) { 
+                            minBelowPriority = p; 
+                            foundFutureTarget = true; 
+                        }
                     }
                 }
             }
         }
-
-        // If *any tier* in this stack contains a future target
         if (foundFutureTarget) {
-            // Calculate distance: How soon is the most urgent box needed?
             int distance = minBelowPriority - currentSeqIndex;
-
-            // The shorter the distance (needed sooner), the heavier the penalty!
-            // This ensures we don't stack boxes on a column that will need to be accessed shortly.
-            return 1000 + (100000 / (distance + 1)); 
+            penalty += 1000 + (100000 / (distance + 1)); 
         }
 
-        return 0; // This stack contains only "past" boxes or non-targets; it is safe.
+        // 2. Height Penalty: Guide towards flatter layout
+        if (currentHeight >= yard.MAX_TIERS - 1) penalty += 5000;
+        else penalty += (currentHeight * 25);
+
+        // 3. ACO Guidance: Divide penalty by pheromone value
+        if (pm != nullptr) {
+            double ph = pm->getPheromone(r, b, currentHeight, currentSeqIndex);
+            if (ph > 0) penalty = static_cast<int>(penalty / ph);
+        }
+        return penalty;
     }
 
     // -------------------------------------------------------------------------
-    // Helper: Find Best Return Slot (Return Strategy with Lookahead)
+    // Helper: Find Best Return Slot
     // -------------------------------------------------------------------------
     static Coordinate findBestReturnSlot(const YardSystem& yard, int targetId, 
                                          const std::unordered_map<int, int>& priorityMap, 
-                                         int currentSeqIndex) {
+                                         int currentSeqIndex,
+                                         const PheromoneManager* pm = nullptr) {
         Coordinate bestPos = {-1, -1, -1};
         int minPenalty = std::numeric_limits<int>::max();
 
@@ -113,21 +159,15 @@ public:
             for (int b = 0; b < yard.MAX_BAYS; ++b) {
                 if (!yard.canReceiveBox(r, b)) continue;
 
-                int penalty = 0;
-                
-                // 1. Calculate penalty for "blocking future targets" (Call logic above)
-                penalty += calculateMovePenalty(yard, r, b, priorityMap, currentSeqIndex);
+                int penalty = calculateMovePenalty(yard, r, b, priorityMap, currentSeqIndex, pm);
 
-                // 2. Extra Heuristic: 
-                // If penalty is still 0 (safe), compare ID or height
                 int topTier = yard.tops[r][b] - 1;
                 if (topTier >= 0) {
                     int boxBelowId = yard.grid[r][b][topTier];
-                    // Stability check: Avoid placing on top of more urgent boxes (smaller ID)
                     if (boxBelowId < targetId) penalty += 50; 
-                    else penalty += yard.tops[r][b]; // Stack height penalty (prefer lower stacks)
+                    else penalty += yard.tops[r][b]; 
                 } else {
-                    penalty += 20; // Slight penalty for empty columns, prefer stacking on safe boxes
+                    penalty += 20; 
                 }
 
                 if (penalty < minPenalty) {
@@ -139,17 +179,13 @@ public:
         return bestPos;
     }
 
-    // -------------------------------------------------------------------------
-    // 1. Pure Evaluation (For GA)
-    // -------------------------------------------------------------------------
-    static int evaluate(const YardSystem& initialYard, const std::vector<int>& retrievalSequence) {
-        return run_internal_logic(initialYard, retrievalSequence);
+    static int evaluate(const YardSystem& initialYard, const std::vector<int>& retrievalSequence, const PheromoneManager* pm = nullptr) {
+        return run_internal_logic(initialYard, retrievalSequence, pm);
     }
-
     // -------------------------------------------------------------------------
     // 2. Execute and Record (For CSV Output)
     // -------------------------------------------------------------------------
-    static std::vector<MissionLog> solveAndRecord(const YardSystem& initialYard, const std::vector<int>& retrievalSequence) {
+    static std::vector<MissionLog> solveAndRecord(const YardSystem& initialYard, const std::vector<int>& retrievalSequence,const PheromoneManager* pm = nullptr) {
         std::vector<LogNode> currentBeam;
         currentBeam.push_back({initialYard, 0, 0, {}}); // g=0, f=0
 
@@ -310,15 +346,14 @@ public:
     }
 
 private:
-    // Internal Logic (For GA - Must match solveAndRecord logic!)
-    static int run_internal_logic(const YardSystem& initialYard, const std::vector<int>& retrievalSequence) {
+    static int run_internal_logic(const YardSystem& initialYard, const std::vector<int>& retrievalSequence, const PheromoneManager* pm) {
          std::vector<SearchNode> currentBeam;
          currentBeam.push_back({initialYard, 0, 0});
          
          std::unordered_map<int, int> priorityMap;
          for(size_t i=0; i<retrievalSequence.size(); ++i) priorityMap[retrievalSequence[i]] = (int)i;
 
-         for (int i = 0; i < retrievalSequence.size(); ++i) {
+         for (int i = 0; i < (int)retrievalSequence.size(); ++i) {
             int targetId = retrievalSequence[i];
             std::vector<SearchNode> finishedBeam;
             std::vector<SearchNode> processingBeam = currentBeam;
@@ -327,10 +362,13 @@ private:
             while(!processingBeam.empty()) {
                 std::vector<SearchNode> nextStep;
                 for(const auto& node : processingBeam) {
+                    // Aggressive Pruning: Discard high-cost paths
+                    if (node.g > 400) continue; 
+
                     if(node.yard.isTop(targetId)) {
                         SearchNode dn = node; 
                         dn.yard.removeBox(targetId);
-                        dn.f = dn.g; // Reset penalty
+                        dn.f = dn.g; 
                         finishedBeam.push_back(dn);
                     } else {
                         auto blks = node.yard.getBlockingBoxes(targetId);
@@ -342,8 +380,7 @@ private:
                                 if(r==pos.row && b==pos.bay) continue;
                                 YardSystem ny = node.yard;
                                 if(ny.moveBox(pos.row, pos.bay, r, b)) {
-                                    // Calculate Penalty here too!
-                                    int penalty = calculateMovePenalty(node.yard, r, b, priorityMap, i);
+                                    int penalty = calculateMovePenalty(ny, r, b, priorityMap, i, pm);
                                     nextStep.push_back({ny, node.g+1, node.g+1+penalty});
                                 }
                             }
@@ -352,17 +389,16 @@ private:
                 }
                 if(!nextStep.empty()) {
                     std::sort(nextStep.begin(), nextStep.end());
-                    if(nextStep.size() > BEAM_WIDTH) nextStep.resize(BEAM_WIDTH);
+                    if(nextStep.size() > (size_t)BEAM_WIDTH) nextStep.resize(BEAM_WIDTH);
                 }
                 processingBeam = nextStep;
                 if(++depth > 30) break;
             }
             if(finishedBeam.empty()) return 99999;
             
-            // Phase 2 Sim (Return)
             std::vector<SearchNode> returnBeam;
             for(const auto& node : finishedBeam) {
-                Coordinate bestSlot = findBestReturnSlot(node.yard, targetId, priorityMap, i);
+                Coordinate bestSlot = findBestReturnSlot(node.yard, targetId, priorityMap, i, pm);
                 if(bestSlot.row != -1) {
                     SearchNode rn = node;
                     rn.yard.initBox(targetId, bestSlot.row, bestSlot.bay, bestSlot.tier);
@@ -373,8 +409,7 @@ private:
             if(returnBeam.empty()) return 99999;
             currentBeam = returnBeam;
          }
-         if(currentBeam.empty()) return 99999;
-         return currentBeam[0].g;
+         return currentBeam.empty() ? 99999 : currentBeam[0].g;
     }
 };
 
@@ -389,9 +424,12 @@ class GeneticAlgorithm {
     std::vector<Individual> population;
     YardSystem yardRef;
     std::mt19937 rng;
+    PheromoneManager* pm; // Pointer to the 4D pheromone matrix
 
 public:
-    GeneticAlgorithm(const YardSystem& yard, const std::vector<int>& targets) : yardRef(yard) {
+    // Updated constructor to accept PheromoneManager
+    GeneticAlgorithm(const YardSystem& yard, const std::vector<int>& targets, PheromoneManager* externalPM) 
+        : yardRef(yard), pm(externalPM) {
         rng.seed(std::chrono::system_clock::now().time_since_epoch().count());
         population.resize(POPULATION_SIZE);
         for (int i = 0; i < POPULATION_SIZE; ++i) {
@@ -403,36 +441,51 @@ public:
 
     void solve() {
         for (int gen = 0; gen < MAX_GENERATIONS; ++gen) {
-            // Calculate Fitness
+            // 1. Parallel Fitness Calculation using OpenMP
+            // Each thread calls BBS_Evaluator::evaluate with the pheromone matrix pointer
+            #pragma omp parallel for
             for (int i = 0; i < POPULATION_SIZE; ++i) {
-                if (population[i].fitness == std::numeric_limits<int>::max())
-                    population[i].fitness = BBS_Evaluator::evaluate(yardRef, population[i].sequence);
+                if (population[i].fitness == std::numeric_limits<int>::max()) {
+                    // Pass pm to guide the internal BBS search with learned pheromones
+                    population[i].fitness = BBS_Evaluator::evaluate(yardRef, population[i].sequence, pm);
+                }
             }
             
-            // Sort
-            std::sort(population.begin(), population.end(), [](const Individual& a, const Individual& b){ return a.fitness < b.fitness; });
+            // 2. Sort by fitness (Ascending order)
+            std::sort(population.begin(), population.end(), [](const Individual& a, const Individual& b){ 
+                return a.fitness < b.fitness; 
+            });
             
+            // 3. Pheromone Update (Learning Phase)
+            // Every 10 generations, use the best individual to reinforce successful paths
+            if (gen % 10 == 0 && population[0].fitness < 99999) {
+                // Generate detailed logs for the best sequence to identify successful coordinates
+                std::vector<MissionLog> bestLogs = BBS_Evaluator::solveAndRecord(yardRef, population[0].sequence, pm);
+                pm->update(bestLogs, population[0].fitness);
+            }
+            
+            // Progress report
             if (gen % 10 == 0 || gen == MAX_GENERATIONS - 1) {
                 std::cout << "Gen " << std::setw(3) << gen << " | Best Cost: " << population[0].fitness << std::endl;
             }
             
-            // Evolution
+            // 4. Evolution Logic (Elitism + Selection + Mutation)
             std::vector<Individual> nextGen;
             int eliteCount = POPULATION_SIZE * 0.1; 
             if (eliteCount < 1) eliteCount = 1;
-            for(int i=0; i<eliteCount; ++i) nextGen.push_back(population[i]); // Elitism
+            for(int i=0; i<eliteCount; ++i) nextGen.push_back(population[i]); // Keep elites
             
             while(nextGen.size() < POPULATION_SIZE) {
-                // Tournament Selection
+                // Tournament Selection (Simple half-population pool)
                 const auto& p1 = population[std::uniform_int_distribution<int>(0, POPULATION_SIZE/2)(rng)];
                 Individual child = p1;
                 
-                // Mutation
+                // Mutation: Swap two random containers in the sequence
                 if(std::uniform_real_distribution<double>(0,1)(rng) < MUTATION_RATE) {
                     int idx1 = std::uniform_int_distribution<int>(0, child.sequence.size()-1)(rng);
                     int idx2 = std::uniform_int_distribution<int>(0, child.sequence.size()-1)(rng);
                     std::swap(child.sequence[idx1], child.sequence[idx2]);
-                    child.fitness = std::numeric_limits<int>::max();
+                    child.fitness = std::numeric_limits<int>::max(); // Mark for re-evaluation
                 }
                 nextGen.push_back(child);
             }
@@ -453,10 +506,7 @@ int main() {
     std::cout << "[Step 0] Loading Configuration..." << std::endl;
     YardConfig config = DataLoader::loadYardConfig("yard_config.csv");
     
-    // Check if configuration loaded successfully
     if (config.max_row == 0) {
-        std::cerr << "Error: Could not load yard_config.csv. Please run generator first." << std::endl;
-        // Fallback (Safe defaults)
         std::cout << "Using fallback defaults: 6x11x8, 400 boxes." << std::endl;
         config = {6, 11, 8, 400};
     } else {
@@ -469,9 +519,7 @@ int main() {
     auto yardData = DataLoader::loadYardSnapshot("mock_yard.csv");
     if (yardData.empty()) { std::cerr << "Error: mock_yard.csv missing." << std::endl; return -1; }
     
-    // [Critical Change] Initialize using config values
     YardSystem yard(config.max_row, config.max_bay, config.max_level, config.total_boxes);
-
     for (const auto& box : yardData) yard.initBox(box.container_id, box.row, box.bay, box.level);
 
     // 2. Load Missions
@@ -486,21 +534,25 @@ int main() {
             originalPrioritySeq.push_back(cmd.parent_carrier_id);
         }
     }
-
     if (targetBlockIds.empty()) { std::cerr << "Error: No valid targets." << std::endl; return -1; }
 
-    std::cout << "Targets to Retrieve: " << targetBlockIds.size() << std::endl;
+    // --- ACO INITIALIZATION ---
+    // Initialize 4D Pheromone Matrix [Row][Bay][Level][Step_Index]
+    // max_steps is capped (e.g., 50) to manage memory and learn periodic patterns
+    PheromoneManager pm(config.max_row, config.max_bay, config.max_level, 50);
 
     // 3. Baseline Evaluation
     std::cout << "\n[Step 2] Calculating Original Sequence Cost..." << std::endl;
-    int originalCost = BBS_Evaluator::evaluate(yard, originalPrioritySeq);
+    // Initial evaluation without pheromone guidance
+    int originalCost = BBS_Evaluator::evaluate(yard, originalPrioritySeq, &pm);
     std::cout << "Original Cost: " << originalCost << std::endl;
 
-    // 4. GA Optimization
-    std::cout << "\n[Step 3] Running GA Optimization..." << std::endl;
+    // 4. GA Optimization with ACO Learning
+    std::cout << "\n[Step 3] Running Hybrid GA-ACO Optimization..." << std::endl;
     auto gaStart = std::chrono::high_resolution_clock::now();
     
-    GeneticAlgorithm ga(yard, targetBlockIds);
+    // Pass the pheromone manager to GA for learning and guidance
+    GeneticAlgorithm ga(yard, targetBlockIds, &pm);
     ga.solve();
     
     auto gaEnd = std::chrono::high_resolution_clock::now();
@@ -510,9 +562,9 @@ int main() {
     std::vector<int> bestSeq = ga.getBestSequence();
     int bestCost = ga.getBestFitness();
 
-    // 6. Generate Detailed Mission Logs
+    // 6. Generate Detailed Mission Logs (Final pass with learned pheromones)
     std::cout << "\n[Step 4] Generating Execution Logs..." << std::endl;
-    std::vector<MissionLog> logs = BBS_Evaluator::solveAndRecord(yard, bestSeq);
+    std::vector<MissionLog> logs = BBS_Evaluator::solveAndRecord(yard, bestSeq, &pm);
 
     std::ofstream outFile("output_missions.csv");
     outFile << "mission_no,mission_type,batch_id,parent_carrier_id,source_position,dest_position,mission_priority,mission_status,created_time\n";
@@ -531,24 +583,16 @@ int main() {
     auto totalEnd = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> totalTime = totalEnd - totalStart;
 
-    // ==========================================
-    // Final Report
-    // ==========================================
+    // Report results
     std::cout << "\n================ EXPERIMENT REPORT ================" << std::endl;
     std::cout << "Optimization Time  : " << gaTime.count() << " sec" << std::endl;
     std::cout << "Total Elapsed Time : " << totalTime.count() << " sec" << std::endl;
     std::cout << "---------------------------------------------------" << std::endl;
     std::cout << "Original Cost      : " << originalCost << std::endl;
     std::cout << "Optimized Cost     : " << bestCost << std::endl;
-    double improvement = (double)(originalCost - bestCost) / originalCost * 100.0;
+    double improvement = (originalCost > 0) ? (double)(originalCost - bestCost) / originalCost * 100.0 : 0;
     std::cout << "Improvement        : " << std::fixed << std::setprecision(2) << improvement << "%" << std::endl;
     std::cout << "---------------------------------------------------" << std::endl;
-    std::cout << "Final Target Sequence (Optimized Order):" << std::endl;
-    std::cout << "[ ";
-    for (size_t i = 0; i < bestSeq.size(); ++i) {
-        std::cout << bestSeq[i] << (i < bestSeq.size() - 1 ? ", " : "");
-    }
-    std::cout << " ]" << std::endl;
     std::cout << "Detailed log saved to 'output_missions.csv'" << std::endl;
 
     return 0;
