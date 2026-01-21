@@ -32,9 +32,8 @@ struct MissionLog {
     long long created_time;
 };
 
-// ==========================================
 // ACO Module: Pheromone Manager (4D Matrix)
-// ==========================================
+
 class PheromoneManager {
 private:
     // Dimensions: [Row][Bay][Level][Step_Index]
@@ -78,9 +77,9 @@ public:
         }
     }
 };
-// ==========================================
+
 // Core Module 1: BBS Evaluator (Revised: With Lookahead Penalty)
-// ==========================================
+
 class BBS_Evaluator {
 public:
     struct SearchNode {
@@ -202,9 +201,9 @@ public:
         for (int i = 0; i < retrievalSequence.size(); ++i) {
             int targetId = retrievalSequence[i];
             
-            // ==========================================
+            
             // Phase 1: Outbound (Move Target to Workstation)
-            // ==========================================
+            
             
             std::vector<LogNode> finishedBeam;
             std::vector<LogNode> processingBeam = currentBeam;
@@ -296,9 +295,9 @@ public:
             std::sort(finishedBeam.begin(), finishedBeam.end());
             if (finishedBeam.size() > BEAM_WIDTH) finishedBeam.resize(BEAM_WIDTH);
 
-            // ==========================================
+            
             // Phase 2: Inbound (Return Target to Yard)
-            // ==========================================
+            
             
             std::vector<LogNode> returnPhaseBeam;
 
@@ -413,9 +412,9 @@ private:
     }
 };
 
-// ==========================================
+
 // GA Module
-// ==========================================
+
 class GeneticAlgorithm {
     struct Individual {
         std::vector<int> sequence;
@@ -497,9 +496,9 @@ public:
     int getBestFitness() { return population[0].fitness; }
 };
 
-// ==========================================
+
 // Main Function
-// ==========================================
+
 int main() {
     auto totalStart = std::chrono::high_resolution_clock::now();
 
