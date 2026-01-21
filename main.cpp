@@ -97,9 +97,7 @@ public:
         bool operator<(const LogNode& other) const { return f < other.f; }
     };
 
-    // -------------------------------------------------------------------------
     // Helper: Calculate Move Penalty with ACO Guidance
-    // -------------------------------------------------------------------------
     static int calculateMovePenalty(const YardSystem& yard, int r, int b, 
                                     const std::unordered_map<int, int>& priorityMap, 
                                     int currentSeqIndex,
