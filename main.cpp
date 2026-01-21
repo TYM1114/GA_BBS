@@ -142,9 +142,7 @@ public:
         return penalty;
     }
 
-    // -------------------------------------------------------------------------
     // Helper: Find Best Return Slot
-    // -------------------------------------------------------------------------
     static Coordinate findBestReturnSlot(const YardSystem& yard, int targetId, 
                                          const std::unordered_map<int, int>& priorityMap, 
                                          int currentSeqIndex,
@@ -179,9 +177,7 @@ public:
     static int evaluate(const YardSystem& initialYard, const std::vector<int>& retrievalSequence, const PheromoneManager* pm = nullptr) {
         return run_internal_logic(initialYard, retrievalSequence, pm);
     }
-    // -------------------------------------------------------------------------
     // 2. Execute and Record (For CSV Output)
-    // -------------------------------------------------------------------------
     static std::vector<MissionLog> solveAndRecord(const YardSystem& initialYard, const std::vector<int>& retrievalSequence,const PheromoneManager* pm = nullptr) {
         std::vector<LogNode> currentBeam;
         currentBeam.push_back({initialYard, 0, 0, {}}); // g=0, f=0
